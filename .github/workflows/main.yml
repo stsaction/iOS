@@ -1,11 +1,11 @@
-name: Pull Request
-
+name: iOS starter workflow
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
-  workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-latest
