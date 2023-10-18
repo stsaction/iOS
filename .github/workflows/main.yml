@@ -1,49 +1,129 @@
-name: iOS starter workflow
-on:
-  push:
+name: iOS starter workflow                  
+on:      
+  push:  
+    branches:        
+      - main   
+  pull_request:  
     branches:
       - main
-  pull_request:
-    branches:
-      - main
+
+env:
+  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}
+  P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+
 jobs:
   build:
-    runs-on: macos-latest
+    name: Build and Test default scheme using any available iPhone simulator
+    runs-on: macos-latest 
 
-    steps:
+    steps: 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v2
 
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.9.1
-        with:
-          access_token: ${{ github.token }}
+      - name: Check Xcode version
+        run: xcodebuild -version
 
-      - name: Setup Xcode
-        uses: xcpretty/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
+      - name: Install the Apple certificate and provisioning profile
+        run: |
+          # Copy the certificate and provisioning profile to the correct locations
+          cp Certificates.p12 $RUNNER_TEMP/build_certificate.p12
+          cp DemoTest.mobileprovision $RUNNER_TEMP/build_pp.mobileprovision
 
-      - name: Install Bundler
-        run: gem install bundler
+          # Import the certificate to the user keychain
+          security import $RUNNER_TEMP/build_certificate.p12 -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k ~/Library/Keychains/login.keychain-db
+          security list-keychain -d user -s ~/Library/Keychains/login.keychain-db
 
-      - name: Install gems
-        run: bundle install
+          # Apply the provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp "$RUNNER_TEMP/build_pp.mobileprovision" ~/Library/MobileDevice/Provisioning\ Profiles
 
-      - name: Swift Packages Cache
-        uses: actions/cache@v2
-        id: cache
-        with:
-          path: |
-            Build/SourcePackages
-            Build/Build/Products
-          key: ${{ runner.os }}-deps-v1-${{ hashFiles('SignIn/SignIn.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: ${{ runner.os }}-deps-v1-
+      - name: Check Shell Version
+        run: echo "$SHELL --version"
 
-      - name: Run Tests (No Cache)
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: bundle exec fastlane unit_test
-      
-      - name: Run Tests (Cache)
-        if: steps.cache.outputs.cache-hit == 'true'
-        run: bundle exec fastlane unit_test skip_package_dependencies_resolution:true
+      - name: Copy Podfile
+        run: cp -r SignIn/Podfile .
+
+      - name: Install CocoaPods
+        run: |
+          sudo gem install cocoapods -v '1.11.2'
+          pod repo list
+          pod setup
+
+      - name: Install dependencies
+        run: pod install --project-directory=SignIn/
+
+      - name: Check current directory
+        run: |
+          pwd
+          ls -al
+
+      - name: Navigate to SignIn folder
+        run: |
+          cd SignIn/
+          ls
+
+      - name: Update provisioning profile specifier in Xcode project
+        run: |
+          gem install xcodeproj
+          ruby - <<EOF
+          require 'xcodeproj'
+
+          # Define the path to your Xcode project
+          project_path = 'SignIn/SignIn.xcodeproj'
+
+          # Define the target name
+          target_name = 'SignIn'
+
+          # Define the provisioning profile specifier
+          provisioning_profile_specifier = "$PROVISIONING_PROFILE_SPECIFIER"
+
+          # Open the Xcode project
+          project = Xcodeproj::Project.open(project_path)
+
+          # Find the target
+          target = project.targets.find { |t| t.name == target_name }
+
+          # Update the provisioning profile settings
+          target.build_configuration_list.build_configurations.each do |configuration|
+            configuration.build_settings['PROVISIONING_PROFILE_SPECIFIER'] = provisioning_profile_specifier
+          end
+
+          # Save the changes to the Xcode project file
+          project.save
+          EOF
+
+      - name: Clear Derived Data
+        run: |
+          rm -rf ~/Library/Developer/Xcode/DerivedData
+
+      - name: Clean Build
+        run: xcodebuild clean -workspace SignIn/SignIn.xcworkspace -scheme SignIn
+
+      - name: Clean and Build
+        run: |
+          xcodebuild clean -workspace SignIn/SignIn.xcworkspace -scheme SignIn
+          xcodebuild build -workspace SignIn/SignIn.xcworkspace -scheme SignIn -sdk iphonesimulator -configuration Debug
+
+      - name: Build and Archive
+        id: build_archive
+        run: |          
+          xcodebuild -workspace SignIn/SignIn.xcworkspace \
+          -scheme SignIn clean archive -configuration release \
+          -sdk iphoneos -archivePath SignIn.xcarchive
+
+      - name: List files in $RUNNER_TEMP
+        run: |
+          ls -a 
+          ls -a SignIn.xcarchive
+          ls -a SignIn.xcarchive/Products/Applications/
+
+#      - name: Export IPA
+#        run: xcodebuild -exportArchive \
+#              -archivePath "SignIn/SignIn.xcarchive" \
+#              -exportPath "SignIn/build" \
+#              -exportOptionsPlist "ExportOptions.plist"
+              
+      - name: Export IPA
+        run: xcodebuild -exportArchive -archivePath SignIn/SignIn.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath SignIn.ipa
+       
